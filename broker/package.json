@@ -1,0 +1,10 @@
+{
+  "name": "iot-broker",
+  "version": "0.0.1",
+  "description": "Web rocks!",
+  "dependencies": {
+    "express": "~4.9.8",
+    "socket.io": "~1.1.0",
+    "commander": "~2.4.0"
+  }
+}
