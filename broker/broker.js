@@ -5,16 +5,26 @@ var __extends = this.__extends || function (d, b) {
     __.prototype = b.prototype;
     d.prototype = new __();
 };
-// TODO: somehow wrap client
 var OpenHardwareClient = (function () {
-    function OpenHardwareClient(sock) {
+    function OpenHardwareClient(sock, broker) {
         this.socket = sock;
         this.bondModules = [];
+        this.ident = this.socket.id;
+        this.broker = broker;
+        var me = this;
+        this.socket.on('command', function (req) {
+            console.log('client sent a command');
+            broker.onRequest(me, req['uri']);
+        });
     }
+    OpenHardwareClient.prototype.notifyEvent = function (eventType, params) {
+        this.socket.emit(eventType, params);
+    };
     OpenHardwareClient.prototype.dispose = function () {
         this.socket = null;
         this.bondModules = null;
     };
+    OpenHardwareClient.maxIdent = 0;
     return OpenHardwareClient;
 })();
 var OpenHardwareRequest = (function () {
@@ -34,9 +44,19 @@ var OpenHardwareRequestParser = (function () {
             ohr.deviceId = res[2];
             ohr.cmd = res[3];
             if (1 <= res[4].length) {
+                var params = res[4].substr(1);
+                ohr.params = {};
+                if (params !== '') {
+                    var paramList = params.split('/');
+                    if (paramList.length !== 1) {
+                        for (var i = 0; i + 1 <= paramList.length; i += 2) {
+                            ohr.params[paramList[i]] = paramList[i + 1];
+                        }
+                        console.log(ohr.params);
+                    }
+                }
                 ohr.params = res[4].substr(1);
             }
-            console.log('ohr' + ohr.params);
             return ohr;
         }
         return null;
@@ -51,20 +71,20 @@ var OpenHardwareBroker = (function () {
     }
     OpenHardwareBroker.prototype.onConnect = function (socket) {
         console.log("hi!");
-        this.clients[socket] = new OpenHardwareClient(socket);
+        this.clients[socket] = new OpenHardwareClient(socket, this);
     };
-    OpenHardwareBroker.prototype.onDisonnect = function (socket) {
+    OpenHardwareBroker.prototype.onDisconnect = function (socket) {
         console.log("bye..");
         var client = this.clients[socket];
         if (client !== undefined && client !== null) {
+            console.log('disconnecting a client');
+            this.detachClientFromResources(client);
+            console.log(client);
             client.dispose();
         }
         delete this.clients[socket];
     };
-    OpenHardwareBroker.prototype.onMessage = function (client, msg) {
-        console.log(msg);
-    };
-    OpenHardwareBroker.prototype.onBindRequest = function (client, path) {
+    OpenHardwareBroker.prototype.onRequest = function (client, path) {
         var parsed = this.parser.parse(path);
         if (parsed === null) {
             console.log('URI format is not valid: ' + path);
@@ -75,8 +95,9 @@ var OpenHardwareBroker = (function () {
             return;
         }
         var module = this.resolveResource(parsed.deviceId);
+        console.log(parsed);
         if (module !== null) {
-            if (parsed.cmd === 'register') {
+            if (parsed.cmd === 'subscribe') {
                 module.registerListener(client, parsed.params);
             }
             return true;
@@ -96,10 +117,22 @@ var OpenHardwareBroker = (function () {
             console.log('hosts other than localhost are not supported yet: ' + path);
             return;
         }
-        var dummyClient = new OpenHardwareClient(null);
+        var dummyClient = new OpenHardwareClient({
+            emit: function (param) {
+            },
+            on: function (type, func) {
+            }
+        }, this);
         var module = this.resolveResource(parsed.deviceId);
         if (module !== null) {
-            module.command(dummyClient, parsed.cmd, parsed.params);
+            if (parsed.cmd === 'subscribe') {
+                module.registerListener(dummyClient, parsed.params);
+                // detach immediately
+                module.detachClient(dummyClient);
+            }
+            else {
+                module.command(dummyClient, parsed.cmd, parsed.params);
+            }
         }
         else {
             console.log('appropriate module not found for request: ' + path);
@@ -111,6 +144,9 @@ var OpenHardwareBroker = (function () {
     OpenHardwareBroker.prototype.resolveResource = function (ident) {
         return this.router.resolve(ident);
     };
+    OpenHardwareBroker.prototype.detachClientFromResources = function (client) {
+        this.router.detachClient(client);
+    };
     OpenHardwareBroker.prototype.sendMessageToClient = function (client, msg) {
     };
     OpenHardwareBroker.URI_SCHEME = 'mozopenhard';
@@ -118,7 +154,7 @@ var OpenHardwareBroker = (function () {
 })();
 var DeviceRouter = (function () {
     function DeviceRouter() {
-        this.modules = [];
+        this.modules = {};
     }
     DeviceRouter.prototype.add = function (ident, module) {
         this.modules[ident] = module;
@@ -130,17 +166,36 @@ var DeviceRouter = (function () {
         }
         return null;
     };
+    DeviceRouter.prototype.detachClient = function (client) {
+        for (var key in this.modules) {
+            var mod = this.modules[key];
+            mod.detachClient(client);
+        }
+    };
     return DeviceRouter;
+})();
+var HardwareModuleClient = (function () {
+    function HardwareModuleClient(client, params) {
+        this.client = client;
+        this.callbackParams = params;
+    }
+    return HardwareModuleClient;
 })();
 var HardwareModule = (function () {
     function HardwareModule() {
+        this.clients = {};
     }
     HardwareModule.prototype.registerListener = function (client, params) {
-        client.bondModules.push(this);
+        this.clients[client.ident] = new HardwareModuleClient(client, params);
     };
     HardwareModule.prototype.detachClient = function (client) {
-        // TODO: somehow remove this
-        // client.bondModules.append(this);
+        var ins = this.clients[client.ident];
+        if (ins !== undefined && ins !== null) {
+            delete this.clients[client.ident];
+        }
+    };
+    HardwareModule.prototype.fireEvent = function (param) {
+        // TODO: implement
     };
     HardwareModule.prototype.command = function (client, cmd, params) {
         // TODO: implement
@@ -213,6 +268,63 @@ var DummyConsoleHardwareModule = (function (_super) {
     };
     return DummyConsoleHardwareModule;
 })(ConsoleHardwareModule);
+////
+// LED modules
+////
+var UltraSonicHardwareModule = (function (_super) {
+    __extends(UltraSonicHardwareModule, _super);
+    function UltraSonicHardwareModule() {
+        _super.apply(this, arguments);
+    }
+    // TODO: somehow trigger 'fireEvent(...)' with appropriate distance info
+    UltraSonicHardwareModule.prototype.fireEvent = function (param) {
+        var distance = param;
+        var cnt = 0;
+        for (var key in this.clients) {
+            var c = this.clients[key];
+            if (c !== undefined) {
+                ++cnt;
+            }
+        }
+        console.log('on event. hello listeners: ' + cnt);
+        for (var key in this.clients) {
+            console.log('trying to detach ' + key);
+            var client = this.clients[key];
+            console.log(client.callbackParams);
+            if (client.callbackParams['minDistance'] <= distance && distance <= client.callbackParams['maxDistance']) {
+                client.client.notifyEvent('detectObject', distance);
+            }
+        }
+    };
+    return UltraSonicHardwareModule;
+})(HardwareModule);
+// http://stackoverflow.com/questions/17217736/while-loop-with-promises
+var q = require('q');
+function promiseWhile(condition, body) {
+    var done = q.defer();
+    function loop() {
+        if (!condition())
+            return done.resolve();
+        q.when(body(), loop, done.reject);
+    }
+    q.nextTick(loop);
+    return done.promise;
+}
+var DummyUltraSonicHardwareModule = (function (_super) {
+    __extends(DummyUltraSonicHardwareModule, _super);
+    function DummyUltraSonicHardwareModule() {
+        _super.call(this);
+        this.startRandomTrigger();
+    }
+    DummyUltraSonicHardwareModule.prototype.startRandomTrigger = function () {
+        var _this = this;
+        promiseWhile(function () { return true; }, function () {
+            _this.fireEvent(20);
+            return q.delay(1300);
+        }).done();
+    };
+    return DummyUltraSonicHardwareModule;
+})(UltraSonicHardwareModule);
 var program = require('commander');
 var app = require('express')();
 var http = require('http').Server(app);
@@ -222,6 +334,7 @@ var broker = new OpenHardwareBroker();
 broker.registerHardwareModule('led0', new DummyLedHardwareModule());
 broker.registerHardwareModule('led1', new DummyLedHardwareModule());
 broker.registerHardwareModule('console0', new DummyConsoleHardwareModule());
+broker.registerHardwareModule('sensor0', new DummyUltraSonicHardwareModule());
 program.version('0.0.1').option('-m, --mode [mode]', 'Mode (demo/prod[default])', 'prod').parse(process.argv);
 app.get('/', function (req, res) {
     res.sendFile('index.html', { root: __dirname });
@@ -240,11 +353,8 @@ else {
 }
 io.on('connection', function (socket) {
     broker.onConnect(socket);
-    socket.on('msg', function (msgBody) {
-        broker.onMessage(socket, msgBody);
-    });
     socket.on('disconnect', function () {
-        broker.onDisonnect(socket);
+        broker.onDisconnect(socket);
     });
     console.log('a user connected');
 });

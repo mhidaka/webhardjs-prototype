@@ -16,7 +16,7 @@
   <body>
     <ul id="messages"></ul>
     <form action="">
-      <input id="m" autocomplete="off" /><button>Send</button>
+      <input id="m" value="mozopenhard://localhost/sensor0/subscribe/minDistance/100/maxDistance/1000" autocomplete="off" /><button>Send</button>
     </form>
     <script src="/socket.io/socket.io.js"></script>
     <script src="http://code.jquery.com/jquery-1.11.1.js"></script>
@@ -24,7 +24,7 @@
       var socket = io();
       var i = 0;
       $('form').submit(function() {
-        socket.emit('btn-push', i);
+        socket.emit('command', {uri: $('#m').val()});
         ++i;
         return false;
       });
